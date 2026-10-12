@@ -1,17 +1,12 @@
 //! Two-or-more-finger canvas navigation.
 //!
 //! A second finger on the canvas cancels any in-progress tool and keeps only pan and pinch-zoom
-//! until every finger is lifted. One finger still drives the current tool once a short grace
-//! window has passed (so a staggered pinch never deposits ink at the first press). Pinch zoom
-//! itself is applied by [`crate::wheel_nav`] (egui's multi-touch zoom factor).
+//! until every finger is lifted. One finger still drives the current tool. Pinch zoom itself is
+//! applied by [`crate::wheel_nav`] (egui's multi-touch zoom factor).
 
-use egui::{Context, Event, Id, Pos2, TouchPhase, Vec2};
+use egui::{Context, Event, Pos2, TouchPhase, Vec2};
 
 use crate::PhotocraftApp;
-
-/// Frames to hold off a lone-finger tool after Touch Start so a second finger can arrive.
-/// ~4 frames ≈ 64 ms at 60 Hz — enough for a staggered pinch, short enough for paint/pan.
-const PINCH_GRACE_FRAMES: u8 = 4;
 
 /// Navigation is active this frame if it already was, or a second finger just landed. The lift
 /// frame must still count as navigation so a pointer-up cannot commit the cancelled tool.
@@ -22,7 +17,8 @@ pub fn active_this_frame(was_nav: bool, touches: usize) -> bool {
 /// Stay in navigation while any finger is still down.
 ///
 /// A leftover Primary after the last finger lifts must *not* keep the latch: that previously
-/// delayed or swallowed a rapid second pinch/pan on touch screens.
+/// delayed or swallowed a rapid second pinch/pan on touch screens. The lift frame itself is
+/// still navigation via [`active_this_frame`]`(was_nav, 0)`.
 pub fn next_latch(nav_this_frame: bool, touches: usize, pointer_down: bool) -> bool {
     let _ = pointer_down;
     touches >= 2 || (nav_this_frame && touches > 0)
@@ -31,35 +27,6 @@ pub fn next_latch(nav_this_frame: bool, touches: usize, pointer_down: bool) -> b
 /// How many fingers egui currently tracks.
 pub fn touch_count(ctx: &Context) -> usize {
     ctx.input(|i| i.multi_touch().map_or(usize::from(i.any_touches()), |m| m.num_touches))
-}
-
-fn grace_id() -> Id {
-    Id::new("pc-touch-pinch-grace")
-}
-
-fn arm_grace(ctx: &Context) {
-    ctx.data_mut(|d| d.insert_temp(grace_id(), PINCH_GRACE_FRAMES));
-}
-
-fn clear_grace(ctx: &Context) {
-    ctx.data_mut(|d| {
-        d.remove::<u8>(grace_id());
-    });
-}
-
-/// Count down the lone-finger grace window; `true` while tools must still stay suppressed.
-fn tick_grace(ctx: &Context) -> bool {
-    let left = ctx.data(|d| d.get_temp::<u8>(grace_id())).unwrap_or(0);
-    if left == 0 {
-        return false;
-    }
-    let next = left.saturating_sub(1);
-    if next == 0 {
-        clear_grace(ctx);
-    } else {
-        ctx.data_mut(|d| d.insert_temp(grace_id(), next));
-    }
-    true
 }
 
 /// Origin eligibility belongs to a canvas, and remains fixed until all contacts are lifted.
@@ -116,31 +83,21 @@ pub fn eligible(ctx: &Context, response: &egui::Response, under_dialog: bool) ->
 /// Update the latch, drop any in-progress tool, and return whether this frame is navigation-only.
 ///
 /// Acceptance:
-/// 1. Rapid consecutive two-finger zoom/pan must work (latch does not stick on leftover Primary).
-/// 2. Before and after touch-nav starts, finger presses must not ink — lone-finger Touch Start
-///    arms a short grace that aborts tools until a second finger arrives or the window expires.
+/// - No stylus: one finger paints (no grace window that eats Primary press).
+/// - Two-finger pan/pinch navigates and aborts tools (no ink during the gesture once multi).
+/// - Rapid consecutive two-finger gestures both work (latch does not stick on leftover Primary).
 pub fn update(app: &mut PhotocraftApp, ctx: &Context, eligible: bool) -> bool {
     if !eligible {
         app.touch_nav = false;
-        clear_grace(ctx);
         return false;
     }
     let touches = touch_count(ctx);
     let pointer_down = ctx.input(|i| i.pointer.any_down());
-    let lone_start = touches == 1
-        && ctx.input(|i| i.events.iter().any(|e| matches!(e, Event::Touch { phase: TouchPhase::Start, .. })));
-    if touches >= 2 || touches == 0 {
-        clear_grace(ctx);
-    } else if lone_start && !app.touch_nav {
-        arm_grace(ctx);
-    }
-    let grace = tick_grace(ctx);
-    let multi_nav = active_this_frame(app.touch_nav, touches);
-    let nav = multi_nav || grace;
+    let nav = active_this_frame(app.touch_nav, touches);
     if nav {
         abort_tools(app, ctx);
     }
-    app.touch_nav = next_latch(multi_nav, touches, pointer_down);
+    app.touch_nav = next_latch(nav, touches, pointer_down);
     nav
 }
 

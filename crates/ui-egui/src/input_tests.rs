@@ -894,9 +894,10 @@ fn consecutive_two_finger_pinches_both_zoom() {
 }
 
 #[test]
-fn staggered_pinch_does_not_ink_at_press_position() {
-    // Acceptance: before and after touch-nav starts, the first finger of a pinch must not
-    // deposit ink at the press position (grace window aborts tools until the second finger).
+fn staggered_pinch_does_not_commit_ink() {
+    // Acceptance: a staggered two-finger gesture must not commit paint — the second finger
+    // aborts any in-progress tool. (A brief live stroke before the second finger is OK;
+    // revision must not advance.)
     let mut h = harness();
     h.state_mut().ui.tool = crate::state::Tool::Brush;
     let _ = h.state_mut().run("tools.setBrush", json!({"brush": {"size": 40, "hardness": 1.0}}));
@@ -906,15 +907,12 @@ fn staggered_pinch_does_not_ink_at_press_position() {
     h.hover_at(a);
     h.run_steps(1);
     let rev0 = h.state().session.active().unwrap().revision;
-    // Finger one alone (with Primary) — grace must suppress the press dab.
     h.input_mut().events.extend([pointer_button(a, true), touch(1, egui::TouchPhase::Start, a)]);
     h.run_steps(1);
-    assert!(h.state().live_stroke.is_none() && h.state().drag.is_none(), "grace must abort tools before second finger");
-    assert_eq!(h.state().session.active().unwrap().revision, rev0, "no ink at press before touch-nav");
-    // Second finger enters navigation; still no paint.
     h.input_mut().events.push(touch(2, egui::TouchPhase::Start, b));
     h.run_steps(1);
-    assert!(h.state().touch_nav);
+    assert!(h.state().touch_nav, "second finger enters touch-nav");
+    assert!(h.state().live_stroke.is_none() && h.state().drag.is_none(), "nav must abort tools");
     let moved = a + vec2(30.0, 20.0);
     h.input_mut().events.extend([
         egui::Event::PointerMoved(moved),
@@ -924,6 +922,31 @@ fn staggered_pinch_does_not_ink_at_press_position() {
     h.run_steps(2);
     h.input_mut().events.extend([pointer_button(moved, false), touch(1, egui::TouchPhase::End, moved), touch(2, egui::TouchPhase::End, b + vec2(30.0, 20.0))]);
     h.run_steps(2);
-    assert_eq!(h.state().session.active().unwrap().revision, rev0, "pinch must not ink before or after nav");
+    assert_eq!(h.state().session.active().unwrap().revision, rev0, "pinch must not commit ink");
     assert!(!h.state().touch_nav);
+}
+
+#[test]
+fn one_finger_with_touch_events_paints_without_stylus() {
+    // Acceptance: without a stylus, a lone finger (Touch + Primary, as mobile Chrome sends)
+    // must be able to paint. Regression for the grace window that ate primary_pressed.
+    let mut h = harness();
+    h.state_mut().ui.tool = crate::state::Tool::Brush;
+    let _ = h.state_mut().run("tools.setBrush", json!({"brush": {"size": 40, "hardness": 1.0}}));
+    let a = h.state().last_canvas_rect.center();
+    h.hover_at(a);
+    h.run_steps(1);
+    let rev0 = h.state().session.active().unwrap().revision;
+    h.input_mut().events.extend([pointer_button(a, true), touch(1, egui::TouchPhase::Start, a)]);
+    h.run_steps(1);
+    assert!(!h.state().touch_nav, "one finger must not enter touch-nav");
+    let moved = a + vec2(40.0, 12.0);
+    h.input_mut().events.extend([egui::Event::PointerMoved(moved), touch(1, egui::TouchPhase::Move, moved)]);
+    h.run_steps(2);
+    h.input_mut().events.extend([pointer_button(moved, false), touch(1, egui::TouchPhase::End, moved)]);
+    h.run_steps(2);
+    assert!(
+        h.state().session.active().unwrap().revision > rev0,
+        "one finger with touch events must paint without a stylus"
+    );
 }
