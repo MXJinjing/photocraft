@@ -894,10 +894,8 @@ fn consecutive_two_finger_pinches_both_zoom() {
 }
 
 #[test]
-fn staggered_pinch_does_not_commit_ink() {
-    // Acceptance: a staggered two-finger gesture must not commit paint — the second finger
-    // aborts any in-progress tool. (A brief live stroke before the second finger is OK;
-    // revision must not advance.)
+fn staggered_pinch_does_not_flash_or_commit_ink() {
+    // Acceptance: staggered two-finger must not show a live stroke flash and must not commit.
     let mut h = harness();
     h.state_mut().ui.tool = crate::state::Tool::Brush;
     let _ = h.state_mut().run("tools.setBrush", json!({"brush": {"size": 40, "hardness": 1.0}}));
@@ -909,10 +907,14 @@ fn staggered_pinch_does_not_commit_ink() {
     let rev0 = h.state().session.active().unwrap().revision;
     h.input_mut().events.extend([pointer_button(a, true), touch(1, egui::TouchPhase::Start, a)]);
     h.run_steps(1);
+    assert!(
+        h.state().live_stroke.is_none() && h.state().drag.is_none(),
+        "pinch grace must suppress the first-finger press dab (no visual flash)"
+    );
     h.input_mut().events.push(touch(2, egui::TouchPhase::Start, b));
     h.run_steps(1);
     assert!(h.state().touch_nav, "second finger enters touch-nav");
-    assert!(h.state().live_stroke.is_none() && h.state().drag.is_none(), "nav must abort tools");
+    assert!(h.state().live_stroke.is_none() && h.state().drag.is_none(), "nav must keep tools clear");
     let moved = a + vec2(30.0, 20.0);
     h.input_mut().events.extend([
         egui::Event::PointerMoved(moved),
@@ -928,8 +930,8 @@ fn staggered_pinch_does_not_commit_ink() {
 
 #[test]
 fn one_finger_with_touch_events_paints_without_stylus() {
-    // Acceptance: without a stylus, a lone finger (Touch + Primary, as mobile Chrome sends)
-    // must be able to paint. Regression for the grace window that ate primary_pressed.
+    // Acceptance: without a stylus, a lone finger (Touch + Primary) must paint after pinch
+    // grace ends — deferred press re-arms the tool without a new OS primary_pressed.
     let mut h = harness();
     h.state_mut().ui.tool = crate::state::Tool::Brush;
     let _ = h.state_mut().run("tools.setBrush", json!({"brush": {"size": 40, "hardness": 1.0}}));
@@ -940,6 +942,9 @@ fn one_finger_with_touch_events_paints_without_stylus() {
     h.input_mut().events.extend([pointer_button(a, true), touch(1, egui::TouchPhase::Start, a)]);
     h.run_steps(1);
     assert!(!h.state().touch_nav, "one finger must not enter touch-nav");
+    assert!(h.state().live_stroke.is_none(), "grace holds off the press dab");
+    // Hold through grace, then move so deferred press can start and paint.
+    h.run_steps(3);
     let moved = a + vec2(40.0, 12.0);
     h.input_mut().events.extend([egui::Event::PointerMoved(moved), touch(1, egui::TouchPhase::Move, moved)]);
     h.run_steps(2);
