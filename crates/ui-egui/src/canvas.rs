@@ -2771,8 +2771,14 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
     // The wheel also scrolls over the scrollbars drawn on top of the canvas (last frame's hover).
     let bars_id = egui::Id::new(("pc-canvas-bars-hover", idx));
     let over_bars = ctx.data(|d| d.get_temp::<bool>(bars_id)).unwrap_or(false);
-    if response.hovered() || free_hover || over_bars {
-        let pointer = ui.input(|i| i.pointer.hover_pos());
+    let touch_eligible = crate::touch_nav::eligible(&ctx, &response, under_dialog);
+    let pinching = touch_eligible && crate::touch_nav::touch_count(&ctx) >= 2;
+    let wheel_over_canvas =
+        (!ctx.input(|i| i.any_touches()) || touch_eligible) && (response.hovered() || free_hover || over_bars || pinching);
+    if wheel_over_canvas {
+        let pointer = ui
+            .input(|i| i.multi_touch().map(|m| m.center_pos).or_else(|| i.pointer.hover_pos()))
+            .or(response.interact_pointer_pos());
         match (wheel, pointer) {
             (Some(crate::wheel_nav::Wheel::Zoom(f)), Some(p)) => {
                 // At a limit the view stays put, as in Photoshop: a notch past 12800 % neither
@@ -2780,6 +2786,12 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
                 let nz = crate::zoom_levels::clamp(view.zoom * f, view.doc_size);
                 if nz != view.zoom {
                     zoom_about(&mut view, &xf, p, nz, false, ppp);
+                }
+            }
+            (Some(crate::wheel_nav::Wheel::Zoom(f)), None) if pinching => {
+                let nz = crate::zoom_levels::clamp(view.zoom * f, view.doc_size);
+                if nz != view.zoom {
+                    zoom_about(&mut view, &xf, rect.center(), nz, false, ppp);
                 }
             }
             (Some(crate::wheel_nav::Wheel::Pan(scroll)), _) => {
@@ -2797,6 +2809,12 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
             }
         }
     }
+    // Touchscreen pinch still shares navigation with its centroid pan below. Mouse wheel and
+    // trackpad events own the pointer instead, so their compatibility drags cannot paint.
+    let wheel_navigation = wheel_over_canvas
+        && wheel.is_some()
+        && ctx.input(|i| !i.any_touches() || i.events.iter().any(|e| matches!(e, egui::Event::MouseWheel { .. } | egui::Event::Zoom(_))));
+    let navigation_input = primary && crate::wheel_nav::blocks_tool_input(&ctx, wheel_navigation);
 
     // Pen pressure/tilt for this frame's tool events (mouse = 1.0), unless Preferences › Tools ›
     // Use Tablet Pressure is off; the pen's eraser end selects the Eraser.
@@ -2844,8 +2862,16 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
         Some(crate::hold_keys::Temporary::ZoomIn) => false,
         _ => alt || sticky_alt,
     };
+    // Two-or-more fingers: only pan/pinch-zoom the canvas; never start or commit a tool.
+    let touch_nav = if navigation_input {
+        app.touch_nav = false;
+        crate::touch_nav::abort_tools(app, &ctx);
+        false
+    } else {
+        crate::touch_nav::update(app, &ctx, touch_eligible)
+    };
 
-    if under_dialog {
+    if under_dialog && !navigation_input {
         // With a colour dialog picker armed the image is its eyedropper, whatever the tool; Space
         // and the middle button still pan. Curves uses the same merged-composite sampler as the
         // Color Picker, never the reduced adjustment preview.
@@ -2904,7 +2930,23 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
     // Preferences › Tools › Enable Flick Panning: a Hand drag let go while moving glides on.
     let flick_id = egui::Id::new(("pc-flick-pan", idx, primary, ctx.viewport_id()));
     let flick_on = app.session.prefs().tools.enable_flick_panning;
-    if let Some(d) = crate::flick_pan::frame(&ctx, flick_id, hand_pan && response.dragged() && !stroke_dismissal, response.drag_delta(), flick_on) {
+    if touch_nav {
+        ctx.set_cursor_icon(crate::tool_cursor::hand(&ctx, true));
+        let d = crate::touch_nav::pan_delta(&ctx).unwrap_or_else(|| {
+            if response.dragged() {
+                response.drag_delta()
+            } else {
+                egui::Vec2::ZERO
+            }
+        });
+        let d = xf.unmap_vec(d) / (view.zoom / ppp);
+        if d.is_finite() {
+            view.center[0] -= d.x;
+            view.center[1] -= d.y;
+        }
+    } else if let Some(d) =
+        crate::flick_pan::frame(&ctx, flick_id, !navigation_input && hand_pan && response.dragged() && !stroke_dismissal, response.drag_delta(), flick_on)
+    {
         let d = xf.unmap_vec(d) / (view.zoom / ppp);
         if d.is_finite() {
             view.center[0] -= d.x;
@@ -2915,13 +2957,15 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
             ctx.data_mut(|m| m.get_temp_mut_or_default::<crate::flick_pan::Flick>(flick_id).stop());
         }
     }
-    if hand_pan && response.dragged() && !stroke_dismissal {
+    if touch_nav {
+        // Centroid pan handled above; do not start tools while multi-touch navigating.
+    } else if !navigation_input && hand_pan && response.dragged() && !stroke_dismissal {
         let d = xf.unmap_vec(response.drag_delta()) / (view.zoom / ppp);
         view.center[0] -= d.x;
         view.center[1] -= d.y;
         // The tool cursors below are skipped while panning: the fist is set here (#2196).
         ctx.set_cursor_icon(crate::tool_cursor::hand(&ctx, true));
-    } else if primary && !stroke_dismissal && temporary.is_none() && !middle && crate::layer_picker::armed(app).is_some() {
+    } else if !navigation_input && primary && !stroke_dismissal && temporary.is_none() && !middle && crate::layer_picker::armed(app).is_some() {
         // A Properties Levels/Curves eyedropper (layer_picker.rs) owns the image until Esc or another
         // tool; Space and the middle button still pan. It samples on the press.
         if response.hovered()
@@ -2940,7 +2984,7 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
             let d = xf.to_doc(p);
             crate::layer_picker::sample_at(app, d[0], d[1]);
         }
-    } else if primary && !stroke_dismissal {
+    } else if !navigation_input && primary && !stroke_dismissal {
         let mods = ui.input(|i| i.modifiers);
         // An ⌥-click the window manager took never arrives; say so (alt_grab.rs).
         crate::alt_grab::watch(app, &ctx, egui::Id::new(("pc-alt-grab", idx)), rect, tool, !under_dialog);

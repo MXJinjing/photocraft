@@ -187,6 +187,7 @@ pub mod tiff_options_ui;
 mod timeline_ui;
 mod titlebar;
 pub mod tone;
+pub mod touch_nav;
 mod tool_cursor;
 pub mod tool_feedback;
 pub(crate) mod tool_memory;
@@ -467,6 +468,8 @@ pub struct PhotocraftApp {
     /// Display profile readings (#569).
     monitors: monitor_status::State,
     checker: Option<egui::TextureHandle>,
+    /// Two-or-more-finger canvas pan/zoom is in progress (`touch_nav`).
+    touch_nav: bool,
     drag: Option<canvas::Drag>,
     /// A Move-tool press landed on a locked layer: the first pointer move shows Photoshop's
     /// message (`move_lock`), a plain click shows nothing.
@@ -697,6 +700,7 @@ impl PhotocraftApp {
             navigator_textures: HashMap::new(),
             monitors: Default::default(),
             checker: None,
+            touch_nav: false,
             drag: None,
             move_blocked: false,
             tool_override: None,
