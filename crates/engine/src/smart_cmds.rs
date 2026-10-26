@@ -186,6 +186,33 @@ pub fn source_decode_count(bytes: &[u8], fmt: PixelFormat) -> u32 {
     SOURCE_CACHE.lock().ok().and_then(|c| c.iter().find(|e| e.key == key).map(|e| e.decodes)).unwrap_or(0)
 }
 
+pub(crate) fn take_caches(layers: &mut [Layer]) -> Vec<(LayerId, Surface)> {
+    let mut out = Vec::new();
+    for l in layers {
+        match &mut l.content {
+            LayerContent::Smart(sm) => out.extend(sm.cache.take().map(|c| (l.id, c))),
+            LayerContent::Group(g) => out.extend(take_caches(&mut g.children)),
+            _ => {}
+        }
+    }
+    out
+}
+
+pub(crate) fn restore_unrendered<E>(
+    doc: &mut Document,
+    taken: Vec<(LayerId, Surface)>,
+    mut fallback: impl FnMut(&Surface) -> std::result::Result<Surface, E>,
+) -> std::result::Result<(), E> {
+    for (id, cache) in taken {
+        if let Some(LayerContent::Smart(sm)) = doc.layer_mut(id).map(|l| &mut l.content)
+            && sm.cache.is_none()
+        {
+            sm.cache = Some(fallback(&cache)?);
+        }
+    }
+    Ok(())
+}
+
 fn buffer_to_surface(buf: &photocraft_compose::Buffer, fmt: PixelFormat) -> Surface {
     let n = fmt.channels();
     let mut data = vec![0.0f32; buf.px.len() * n];
@@ -617,6 +644,40 @@ fn smart_mut(doc: &mut Document, id: LayerId) -> Result<&mut SmartObject> {
     }
 }
 
+/// Whether `l`'s filter mask can be painted (`"target":"filterMask"`): a smart object with smart
+/// filters. Its filter mask need not exist yet: painting starts it white (Reveal All), the mask
+/// Photoshop adds with the first smart filter.
+pub(crate) fn filter_mask_paintable(l: &Layer) -> std::result::Result<(), String> {
+    match &l.content {
+        LayerContent::Smart(sm) if !sm.smart_filters.is_empty() => Ok(()),
+        LayerContent::Smart(_) => Err(format!("smart object \"{}\" has no smart filters, so no filter mask", l.name)),
+        other => Err(format!("the active layer is {} {} layer, not a smart object", other.article(), other.kind_name())),
+    }
+}
+
+/// The filter mask surface of smart object `id` for painting into, made white (Reveal All) first
+/// when the object has smart filters but no filter mask yet. The caller re-renders the object
+/// afterwards ([`refresh_after_filter_mask_edit`]).
+pub(crate) fn filter_mask_surface(doc: &mut Document, id: LayerId) -> Result<&mut Surface> {
+    let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
+    filter_mask_paintable(l).map_err(EngineError::Other)?;
+    let sm = smart_mut_of(l)?;
+    Ok(&mut sm.filter_mask.get_or_insert_with(LayerMask::reveal_all).surface)
+}
+
+/// Re-renders smart object `id` after its filter mask was painted, filled or filtered, so the
+/// stroke shows (where the mask is black the smart filters don't). Part of the same history step.
+pub(crate) fn refresh_after_filter_mask_edit(doc: &mut Document, id: LayerId) -> Result<()> {
+    if matches!(doc.layer(id).map(|l| &l.content), Some(LayerContent::Smart(_))) { refresh_or_fail(doc, id) } else { Ok(()) }
+}
+
+fn smart_mut_of(l: &mut Layer) -> Result<&mut SmartObject> {
+    match &mut l.content {
+        LayerContent::Smart(sm) => Ok(sm),
+        _ => Err(other("the layer is not a smart object")),
+    }
+}
+
 fn mask_from_selection(sel: &Surface) -> LayerMask {
     LayerMask { surface: sel.clone(), enabled: true, linked: true, density: 1.0, feather: 0.0 }
 }
@@ -962,6 +1023,13 @@ fn replace_contents(s: &mut Session, p: &Value) -> Result<Value> {
     replace_contents_bytes(s, id, &base_name(&path), bytes)
 }
 
+/// Replace Contents with a file the caller already read, for the smart object `p` names (`layer`,
+/// else the active layer): the body of the command minus its ambient path read (#8061).
+pub fn replace_contents_from_bytes(s: &mut Session, p: &Value, file_name: &str, bytes: Vec<u8>) -> Result<Value> {
+    let id = layer_param(s, p)?;
+    replace_contents_bytes(s, id, file_name, bytes)
+}
+
 /// Replace Contents from a file's name and bytes: what the desktop and web file pickers hand over.
 pub fn replace_contents_bytes(s: &mut Session, id: LayerId, file_name: &str, bytes: Vec<u8>) -> Result<Value> {
     decode_source(file_name, &bytes)?; // fail before touching the document
@@ -1034,6 +1102,7 @@ pub fn commit_child(s: &mut Session, index: usize) -> Result<bool> {
     let bytes = Arc::new(encode_source(&child)?);
     let prev = s.active;
     s.active = Some(parent);
+    s.note_active_change();
     let r = s.edit("Edit Contents", |doc, _| {
         let ids = instances(doc, link.contents_id);
         if ids.is_empty() {
@@ -1053,6 +1122,7 @@ pub fn commit_child(s: &mut Session, index: usize) -> Result<bool> {
         Ok(())
     });
     s.active = prev;
+    s.note_active_change();
     r?;
     if let Some(st) = s.docs.get_mut(index) {
         st.saved_revision = st.revision;

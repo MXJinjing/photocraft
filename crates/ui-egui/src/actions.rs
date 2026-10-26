@@ -454,9 +454,9 @@ fn insert_stop_dialog(app: &mut PhotocraftApp) -> Result<Value, String> {
 }
 
 pub fn insert_stop_body(ui: &mut egui::Ui, fields: &mut serde_json::Map<String, Value>) {
-    ui.label(tl!("Message:"));
+    let message_label = ui.label(tl!("Message:"));
     let mut message = fields.get("message").and_then(Value::as_str).unwrap_or_default().to_string();
-    ui.add(egui::TextEdit::multiline(&mut message).desired_rows(4).desired_width(320.0));
+    ui.add(egui::TextEdit::multiline(&mut message).desired_rows(4).desired_width(320.0)).labelled_by(message_label.id);
     fields.insert("message".into(), json!(message));
     ui.add_space(6.0);
     let mut allow = fields.get("allowContinue").and_then(Value::as_bool).unwrap_or(false);
@@ -760,8 +760,8 @@ fn delete_selection(app: &mut PhotocraftApp) {
 /// returns the new name to commit; Escape cancels and keeps the old name.
 fn rename_field(app: &mut PhotocraftApp, ui: &mut egui::Ui, index: usize, rect: Rect) -> Option<String> {
     let mut r = app.ui.actions.renaming.take().filter(|r| r.index == index)?;
-    let id = egui::Id::new(("action-rename-field", index));
-    let te = ui.put(rect, egui::TextEdit::singleline(&mut r.text).id(id).font(egui::FontId::proportional(12.0)));
+    let id = egui::Id::unique(("action-rename-field", index));
+    let te = ui.put(rect, egui::TextEdit::singleline(&mut r.text).id(id).font(egui::FontId::proportional(12.0))).accessible_name(tl!("Name"));
     if !r.focused {
         te.request_focus();
         // Like Photoshop, the whole name starts selected so typing replaces it.
@@ -901,7 +901,7 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 shown_set = Some(set);
                 let collapsed = app.ui.actions.collapsed_sets.iter().any(|c| c == set);
                 let (hr, hresp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
-                hresp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, !collapsed, set));
+                hresp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, !collapsed, set));
                 if hresp.hovered() {
                     ui.painter().rect_filled(hr, 0.0, t.hover.gamma_multiply(0.5));
                 }
@@ -944,7 +944,7 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             }
             let button_mode = app.ui.actions.button_mode;
             let sel = app.ui.actions.selected == Some(i) && app.ui.actions.selected_step.is_none();
-            resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, sel, name));
+            resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, sel, name));
             if button_mode {
                 ui.painter().rect_filled(rect, 3.0, button_fill(swatch, &t));
             } else if sel {
@@ -1067,7 +1067,7 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     }
                     let label = step_label(id, params);
                     let selected = app.ui.actions.selected == Some(i) && app.ui.actions.selected_step == Some(step);
-                    response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, &label));
+                    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, &label));
                     if selected {
                         ui.painter().rect_filled(r, 0.0, t.row_selected);
                     } else if response.hovered() {
@@ -1082,22 +1082,22 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     // Photoshop's check column: unchecked steps are skipped by playback, Batch and droplets.
                     let check = ui.interact(
                         Rect::from_center_size(pos2(x0 + 30.0, r.center().y), vec2(16.0, 16.0)),
-                        ui.id().with(("action-step-check", i, step)),
+                        ui.scope_id().with(("action-step-check", i, step)),
                         Sense::click(),
                     );
-                    check.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, on, format!("{}: {label}", tl!("Include in playback"))));
+                    check.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, format!("{}: {label}", tl!("Include in playback"))));
                     paint_check(ui, check.rect, on, &t);
                     // Photoshop's dialog column: playback shows the step's dialog, seeded with its
                     // recorded values, and continues when it is confirmed.
                     let with_dialog = dialogs.contains(&step);
                     let dialog = ui.interact(
                         Rect::from_center_size(pos2(x0 + 46.0, r.center().y), vec2(16.0, 16.0)),
-                        ui.id().with(("action-step-dialog", i, step)),
+                        ui.scope_id().with(("action-step-dialog", i, step)),
                         Sense::click(),
                     );
                     // A toggle button, not a check box, so the check column stays the only CheckBox role.
                     dialog.widget_info(|| {
-                        egui::WidgetInfo::selected(egui::WidgetType::Button, true, with_dialog, format!("{}: {label}", tl!("Show dialog during playback")))
+                        egui::WidgetInfo::selected(egui::Role::Button, true, with_dialog, format!("{}: {label}", tl!("Show dialog during playback")))
                     });
                     crate::icons::paint(ui, dialog.rect, "message-square", 11.0, if with_dialog { t.icon } else { t.text_faint.gamma_multiply(0.45) });
                     let dialog = dialog.on_hover_text(tl!("Show dialog during playback"));
@@ -1156,7 +1156,7 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             begin_recording(app, true);
         }
         let play = crate::icons::button(ui, "play", 24.0, false, tl!("Play selection"));
-        play.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tl!("Play selection")));
+        play.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tl!("Play selection")));
         if play.clicked() {
             play_idx = playback_selection(app);
         }
@@ -1166,14 +1166,14 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         let can_delete = app.ui.actions.selected.is_some() && (!recording_now || app.ui.actions.selected_step.is_some());
         ui.add_enabled_ui(can_delete, |ui| {
             let response = crate::icons::button(ui, "trash", 24.0, false, tl!("Delete"));
-            response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, can_delete, tl!("Delete")));
+            response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, can_delete, tl!("Delete")));
             if response.clicked() {
                 delete_selection(app);
             }
         });
         let mode_label = if app.ui.actions.button_mode { tl!("Button Mode On") } else { tl!("Button Mode") };
         let mode_button = ui.add_enabled(!recording_now, egui::Button::new(mode_label).small()).on_hover_text(tl!("Button Mode"));
-        mode_button.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, !recording_now, mode_label));
+        mode_button.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, !recording_now, mode_label));
         if mode_button.clicked() {
             app.ui.actions.button_mode = !app.ui.actions.button_mode;
         }
@@ -1733,6 +1733,74 @@ mod tests {
         let (played, b_changed, a_changed) = record_save_on_a_play_on_b("png", true);
         assert!(played.get("failed").is_some(), "{played}");
         assert!(!b_changed && !a_changed);
+    }
+
+    /// Loads a Photoshop set holding Invert + a Save As into `dest` and plays it on a PSD.
+    /// Returns the played result, whether the PSD changed on disk and the files in `out`.
+    fn play_imported_save_as(dest: &str) -> (Value, bool, Vec<String>) {
+        use photocraft_psd::atn::{AtnAction, AtnEvent, AtnFile, AtnItem};
+        use photocraft_psd::descriptor::{Descriptor, UnicodeString, Value as D};
+        let dir = std::env::temp_dir().join(format!("photocraft-atn-save-as-{}-{}", dest.len(), std::process::id()));
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let src = dir.join("src.psd").to_string_lossy().into_owned();
+        let path = |text: &str| {
+            let units: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+            let mut b = b"txtu".to_vec();
+            b.extend_from_slice(&((12 + units.len() * 2) as u32).to_le_bytes());
+            b.extend_from_slice(&(units.len() as u32).to_le_bytes());
+            units.iter().for_each(|u| b.extend_from_slice(&u.to_le_bytes()));
+            D::Path(b)
+        };
+        let save = Descriptor::new("null")
+            .with("As  ", D::Descriptor(Descriptor::new("PNGF")))
+            .with("In  ", path(&out.join(dest).to_string_lossy()))
+            .with("DocI", D::Integer(53));
+        let item = |code: &[u8; 4], label: &str, d: Option<Descriptor>| AtnItem {
+            event: AtnEvent::Code(*code),
+            dictionary: label.into(),
+            descriptor: d,
+            ..Default::default()
+        };
+        let set = AtnFile {
+            name: UnicodeString::new_nul("Export"),
+            actions: vec![AtnAction {
+                name: UnicodeString::new_nul("Invert and save"),
+                items: vec![item(b"Invr", "Invert", None), item(b"save", "Save", Some(save))],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut app = disk_app(vec![]);
+        app.run("file.new", json!({"width": 16, "height": 16})).unwrap();
+        app.save_as(Some(src.clone())).unwrap();
+        let before = std::fs::read(&src).unwrap();
+        app.run("actions.load", json!({"data": photocraft_engine::paint::tile::b64_encode(&photocraft_psd::atn::write(&set).unwrap())})).unwrap();
+        app.open_path(&src).unwrap();
+        let played = app.run("actions.play", json!({"action": 0})).unwrap();
+        let mut written: Vec<String> = std::fs::read_dir(&out).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        written.sort();
+        let r = (played, std::fs::read(&src).unwrap() != before, written);
+        let _ = std::fs::remove_dir_all(&dir);
+        r
+    }
+
+    #[test]
+    fn imported_save_as_writes_the_recorded_file_not_the_played_one() {
+        // #7102: the Save As imported as File › Save, which wrote over src.psd.
+        let (played, src_changed, written) = play_imported_save_as("result.png");
+        assert!(played.get("failed").is_none(), "{played}");
+        assert!(!src_changed, "the Save As wrote over the file the action was played on");
+        assert_eq!(written, ["result.png"]);
+    }
+
+    #[test]
+    fn imported_save_as_into_a_folder_stops_before_writing() {
+        // A folder destination isn't mapped yet (#5430): playback stops on it, nothing is saved.
+        let (played, src_changed, written) = play_imported_save_as("folder");
+        assert!(played.get("failed").is_some(), "{played}");
+        assert!(!src_changed);
+        assert!(written.is_empty(), "{written:?}");
     }
 
     #[test]

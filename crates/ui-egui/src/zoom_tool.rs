@@ -28,7 +28,7 @@ struct ZoomDrag {
 }
 
 fn id() -> egui::Id {
-    egui::Id::new("pc-zoom-tool-drag")
+    egui::Id::unique("pc-zoom-tool-drag")
 }
 
 /// Drop an in-progress Zoom-tool drag without applying it.
@@ -160,6 +160,14 @@ mod tests {
 
     fn view_xf(h: &Harness<'static, PhotocraftApp>) -> ViewXform {
         ViewXform::active(h.state()).unwrap()
+    }
+
+    // Pixel alignment derives a presentation camera within half a display pixel of the
+    // stored target; interrupting an animation must keep that same target and its zoom.
+    fn assert_camera_center(h: &Harness<'static, PhotocraftApp>, target: &View) {
+        let xf = view_xf(h);
+        let delta = (xf.to_screen(target.center[0], target.center[1]) - xf.rect.center()) * h.ctx.pixels_per_point();
+        assert!(delta.x.abs() <= 0.501 && delta.y.abs() <= 0.501, "camera differs by {delta:?} display pixels");
     }
 
     fn press(h: &mut Harness<'static, PhotocraftApp>, p: Pos2, pressed: bool) {
@@ -396,7 +404,7 @@ mod tests {
             let target = &h.state().ui.views[0];
             assert!(!target.zoom_animating, "{command}");
             assert_eq!(view_xf(&h).zoom, target.zoom);
-            assert_eq!(view_xf(&h).center, target.center);
+            assert_camera_center(&h, target);
         }
     }
 
@@ -416,6 +424,7 @@ mod tests {
                     unit: egui::MouseWheelUnit::Line,
                     delta: vec2(0.0, 1.0),
                     phase: egui::TouchPhase::Move,
+                    source: egui::MouseWheelSource::Unknown,
                     modifiers: egui::Modifiers { alt: gesture == 1, ..Default::default() },
                 }),
                 _ => {
@@ -429,7 +438,7 @@ mod tests {
             h.step();
             let target = &h.state().ui.views[0];
             assert_eq!(view_xf(&h).zoom, target.zoom, "gesture {gesture}");
-            assert_eq!(view_xf(&h).center, target.center, "gesture {gesture}");
+            assert_camera_center(&h, target);
         }
     }
 
