@@ -1,6 +1,6 @@
 //! The menu bar from the keyboard (#4988), as Photoshop's on Windows: a tap on Alt (or F10)
-//! puts the keyboard on the bar (File lit; ← / → move along it, ↓ / ↩ / Space open the lit menu,
-//! Esc or a click leaves), Alt+letter opens the menu with that mnemonic straight away, and in an
+//! puts the keyboard on the bar (File lit; ← / → move along it, ↓ / ↩ open the lit menu,
+//! Esc, Space or a click leaves), Alt+letter opens the menu with that mnemonic straight away, and in an
 //! open menu a letter runs the row with that mnemonic (or opens its submenu).
 //!
 //! Mnemonics are underlined while Alt is held, the bar is focused or a menu was opened from the
@@ -51,11 +51,11 @@ pub struct Keys {
 }
 
 fn keys_id() -> Id {
-    Id::new("pc-menu-bar-keys")
+    Id::unique("pc-menu-bar-keys")
 }
 
 fn focus_id() -> Id {
-    Id::new("pc-menu-bar-focus")
+    Id::unique("pc-menu-bar-focus")
 }
 
 /// Is the keyboard on the menu bar (no menu open yet)? The shortcuts leave the keys to it then,
@@ -296,6 +296,10 @@ impl Keys {
         let raw = ctx.input(|i| i.raw.events.clone());
         for e in &raw {
             match e {
+                // A held Alt auto-repeats (after about half a second on Windows): only its first
+                // press starts a tap. A repeat must neither re-arm a tap that Alt+wheel or a key
+                // already spent, nor spend one itself (holding Alt alone is still a tap).
+                Event::Key { key: Key::AltLeft | Key::AltRight, pressed: true, repeat: true, .. } => self.alt_down = true,
                 Event::Key { key: Key::AltLeft | Key::AltRight, pressed: true, .. } => {
                     self.alt_down = true;
                     // Alt pressed while a mouse button is down is a modifier for that drag
@@ -404,8 +408,13 @@ impl Keys {
             self.focus = Some((focus + 1) % n);
         } else if press(Key::ArrowLeft) {
             self.focus = Some((focus + n - 1) % n);
-        } else if press(Key::ArrowDown) || press(Key::Enter) || press(Key::Space) {
+        } else if press(Key::ArrowDown) || press(Key::Enter) {
             open_top(focus, self);
+        } else if events.iter().any(|e| matches!(e, Event::Key { key: Key::Space, pressed: true, .. })) {
+            // Space is the Hand tool, and on Windows it opens the window menu there, never File:
+            // it takes the keyboard off the bar, so a stray Alt tap can't have held Space run
+            // File › New….
+            self.focus = None;
         } else if let Some((key, c)) = events.iter().find_map(|e| match e {
             Event::Key { key, pressed: true, modifiers, .. } if modifiers.is_none() => key_char(*key).map(|c| (*key, c)),
             _ => None,

@@ -65,12 +65,16 @@ pub(crate) fn has_paintable(s: &Session) -> std::result::Result<(), String> {
     }
 }
 
-/// Surface a paint command writes to: the layer's pixels, or its mask with `"target":"mask"`.
+/// Surface a paint command writes to: the layer's pixels, its mask with `"target":"mask"`, or a
+/// smart object's filter mask with `"target":"filterMask"`.
 pub(crate) fn paint_surface<'a>(doc: &'a mut Document, id: LayerId, p: &Value) -> Result<&'a mut photocraft_raster::Surface> {
     if is_mask_target(p) {
         check_all_unlocked(doc, id)?;
     } else {
         check_pixels_unlocked(doc, id)?;
+    }
+    if crate::channel_cmds::target_of(p) == crate::channel_cmds::Target::FilterMask {
+        return crate::smart_cmds::filter_mask_surface(doc, id);
     }
     let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
     if is_mask_target(p) {
@@ -80,7 +84,7 @@ pub(crate) fn paint_surface<'a>(doc: &'a mut Document, id: LayerId, p: &Value) -
     }
 }
 
-fn check_all_unlocked(doc: &Document, id: LayerId) -> Result<()> {
+pub(crate) fn check_all_unlocked(doc: &Document, id: LayerId) -> Result<()> {
     let locks = doc.effective_locks(id);
     let l = doc.layer(id).ok_or(EngineError::NoLayer(id))?;
     if locks.all {
@@ -99,8 +103,10 @@ pub(crate) fn check_pixels_unlocked(doc: &Document, id: LayerId) -> Result<()> {
     Ok(())
 }
 
+/// The params target a grayscale mask of the layer: its layer mask (`"mask"`) or, on a smart
+/// object, its filter mask (`"filterMask"`).
 pub(crate) fn is_mask_target(p: &Value) -> bool {
-    p.get("target").and_then(Value::as_str) == Some("mask")
+    matches!(p.get("target").and_then(Value::as_str), Some("mask" | "filterMask"))
 }
 
 fn can_undo(s: &Session) -> std::result::Result<(), String> {
@@ -282,6 +288,10 @@ pub(crate) fn color_param(cmd: &str, p: &Value, key: &str, default: [f32; 4]) ->
 }
 pub(crate) fn parse_hex(s: &str) -> Option<[f32; 4]> {
     let s = s.trim_start_matches('#');
+    // `from_str_radix` accepts a leading '+', so "+f" would read as 0x0f.
+    if !s.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
     let b = |i: usize| u8::from_str_radix(s.get(i..i + 2)?, 16).ok().map(|v| v as f32 / 255.0);
     match s.len() {
         6 => Some([b(0)?, b(2)?, b(4)?, 1.0]),
@@ -461,10 +471,9 @@ fn destructive_adjust(s: &mut Session, label: &str, adj: Adjustment, p: &Value) 
         // The targeted layer mask (#780): ⌘I inverts it, as in Photoshop.
         let id = layer_param(s, &Value::Null)?;
         return s.edit(label, |doc, _| {
+            check_all_unlocked(doc, id)?;
             let sel = doc.selection.clone();
-            let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
-            let mask = l.mask.as_mut().ok_or_else(|| EngineError::Other("layer has no mask".into()))?;
-            pixels::adjust_mask(&mut mask.surface, &adj, sel.as_ref());
+            pixels::adjust_mask(paint_surface(doc, id, p)?, &adj, sel.as_ref()).map_err(EngineError::Other)?;
             Ok(Value::Null)
         });
     }
@@ -474,7 +483,7 @@ fn destructive_adjust(s: &mut Session, label: &str, adj: Adjustment, p: &Value) 
         return s.edit(label, |doc, _| {
             let sel = doc.selection.clone();
             if let Some(surf) = crate::channel_cmds::channel_surface_for_filter(doc, None, p)? {
-                pixels::adjust_mask(surf, &adj, sel.as_ref());
+                pixels::adjust_mask(surf, &adj, sel.as_ref()).map_err(EngineError::Other)?;
             }
             Ok(Value::Null)
         });
@@ -484,7 +493,7 @@ fn destructive_adjust(s: &mut Session, label: &str, adj: Adjustment, p: &Value) 
         let sel = doc.selection.clone();
         let mode = doc.mode;
         let surf = paint_surface(doc, id, &Value::Null)?;
-        pixels::adjust_surface(surf, &adj, sel.as_ref(), mode);
+        pixels::adjust_surface(surf, &adj, sel.as_ref(), mode).map_err(EngineError::Other)?;
         Ok(())
     })?;
     Ok(Value::Null)
@@ -538,7 +547,7 @@ fn build() -> Vec<CommandSpec> {
             "New…",
             ["File"],
             Some("Cmd+N"),
-            r##"{"width":1..300000=1920,"height":1..300000=1080 (pixel counts are rounded),"mode":"rgb|gray|grayscale|cmyk|lab"="rgb","depth":8|16|32=8,"background":"white|black|backgroundColor|transparent|#rrggbb"="white","backgroundColor":[r,g,b]? (0..1; defaults to toolbox colour),"resolution":1..30000=72 (ppi),"name":str,"profile":"working"|built-in id|path to an .icc file="working" (the colour profile it is tagged with; it must suit the mode)}"##,
+            r##"{"width":1..300000=1920,"height":1..300000=1080 (pixel counts are rounded),"mode":"rgb|gray|grayscale|cmyk|lab"="rgb","depth":8|16|32=8,"background":"white|black|backgroundColor|transparent|#rrggbb"="white","backgroundColor":[r,g,b]? (0..1; defaults to toolbox colour),"resolution":1..30000=72 (ppi),"name":str,"artboard":bool=false (one artboard over the canvas, its background the chosen one, holding an empty Layer 1; no Background layer),"profile":"working"|built-in id|path to an .icc file="working" (the colour profile it is tagged with; it must suit the mode)}"##,
             always,
             |s, p| {
                 use crate::document_preset_cmds::{MAX_DIMENSION, MAX_RESOLUTION, background_color, color_mode, sample_type};
@@ -557,21 +566,27 @@ fn build() -> Vec<CommandSpec> {
                 let depth = sample_type(p.get("depth").and_then(Value::as_u64).unwrap_or(8)).unwrap_or(SampleType::U8);
                 let name = p.get("name").and_then(Value::as_str).unwrap_or("Untitled").to_string();
                 let res = p.get("resolution").and_then(Value::as_f64).unwrap_or(72.0).clamp(1.0, MAX_RESOLUTION) as f32;
-                let mut doc = match p.get("background").and_then(Value::as_str).unwrap_or("white") {
+                // The background colour; `None` for Transparent.
+                let background = match p.get("background").and_then(Value::as_str).unwrap_or("white") {
                     "backgroundColor" => {
                         let bgc = background_color(p, s.tools.background, "file.new")?;
-                        Document::with_background(name, Size::new(w, h), mode, depth, Color::rgba(bgc[0], bgc[1], bgc[2], 1.0))
+                        Some(Color::rgba(bgc[0], bgc[1], bgc[2], 1.0))
                     }
-                    "transparent" => {
-                        let mut d = Document::new(name, Size::new(w, h), mode, depth);
-                        d.layers.push(Layer::raster("Layer 1", d.pixel_format()));
-                        d
-                    }
-                    "black" => Document::with_background(name, Size::new(w, h), mode, depth, Color::BLACK),
+                    "transparent" => None,
+                    "black" => Some(Color::BLACK),
                     other => {
                         let c = parse_hex(other).unwrap_or([1.0; 4]);
-                        Document::with_background(name, Size::new(w, h), mode, depth, Color::rgba(c[0], c[1], c[2], c[3]))
+                        Some(Color::rgba(c[0], c[1], c[2], c[3]))
                     }
+                };
+                let mut doc = if p.get("artboard").and_then(Value::as_bool).unwrap_or(false) {
+                    crate::artboard_cmds::new_artboard_document(name, Size::new(w, h), mode, depth, background)
+                } else if let Some(c) = background {
+                    Document::with_background(name, Size::new(w, h), mode, depth, c)
+                } else {
+                    let mut d = Document::new(name, Size::new(w, h), mode, depth);
+                    d.layers.push(Layer::raster("Layer 1", d.pixel_format()));
+                    d
                 };
                 doc.resolution_dpi = res;
                 // Photoshop's New Document › Color Profile: tag the document with another profile
@@ -603,7 +618,7 @@ fn build() -> Vec<CommandSpec> {
             "Fill…",
             ["Edit"],
             Some("Shift+F5"),
-            r##"{"contents":"foreground|background|color|contentAware|pattern|history|black|gray|white"="color","color":"#rrggbb|[r,g,b,a]"=foreground (contents=color),"pattern":id|name (contents=pattern),"scale":%=100,"angle":deg,"state":row?,"snapshot":id? (contents=history: a History panel row as history.setSource, redo rows last, or a snapshot; default the History Brush source),"colorAdaptation":bool=true (contents=contentAware),"mode":"normal|multiply|…"="normal","opacity":0..100=100,"preserveTransparency":bool=false,"target":"pixels"|"mask"|"quickMask"|{"channel":i}?}"##,
+            r##"{"contents":"foreground|background|color|contentAware|pattern|history|black|gray|white"="color","color":"#rrggbb|[r,g,b,a]"=foreground (contents=color),"pattern":id|name (contents=pattern),"scale":%=100,"angle":deg,"state":row?,"snapshot":id? (contents=history: a History panel row as history.setSource, redo rows last, or a snapshot; default the History Brush source),"colorAdaptation":bool=true (contents=contentAware),"mode":"normal|multiply|…"="normal","opacity":0..100=100,"preserveTransparency":bool=false,"target":"pixels"|"mask"|"filterMask"|"quickMask"|{"channel":i}?}"##,
             has_pixel_or_channel,
             crate::fill_cmds::fill
         ),
@@ -1135,7 +1150,7 @@ fn build() -> Vec<CommandSpec> {
             "Reorder Layer",
             [],
             None,
-            r##"{"layer":id?| "layers":[id,…]?, "target":id,"position":"above|below|into"="above","copy":bool=false} (layers: one undoable move, document order preserved; copy: place duplicates there and leave the layers, as ⌥-dragging a Layers panel row)"##,
+            r##"{"layer":id?| "layers":[id,…]?, "target":id|name,"targetOccurrence":n? (which of several layers named `target`, in document order),"position":"above|below|into"="above","copy":bool=false} (layers: one undoable move, document order preserved; copy: place duplicates there and leave the layers, as ⌥-dragging a Layers panel row; a recorded action keeps the target by name)"##,
             has_layer,
             crate::layer_multi_cmds::move_to
         ),
@@ -1184,7 +1199,7 @@ fn build() -> Vec<CommandSpec> {
             "Brush Stroke",
             [],
             None,
-            r##"{"points":[[x,y,pressure?,tiltX?,tiltY?,rotation?,timeMs?,wheel?],…],"brush":{…BrushSettings}?,"preset":name?,"size":0.5..5000 px?,"hardness":0..1?,"opacity":0..1?,"flow":0..1?,"spacing":0..10?,"color":"#rrggbb"?=foreground,"mode":"normal|multiply|screen|…|clear (erases with this brush)"="normal","erase":bool?,"smoothing":0..1?,"zoom":number=1,"seed":u64?,"target":"pixels"|"mask"|"quickMask"|{"channel":i}=Channels panel target}"##,
+            r##"{"points":[[x,y,pressure?,tiltX?,tiltY?,rotation?,timeMs?,wheel?],…],"brush":{…BrushSettings}?,"preset":name?,"size":0.5..5000 px?,"hardness":0..1?,"opacity":0..1?,"flow":0..1?,"spacing":0..10?,"color":"#rrggbb"?=foreground,"mode":"normal|multiply|screen|…|clear (erases with this brush)"="normal","erase":bool?,"smoothing":0..1?,"zoom":number=1,"seed":u64?,"target":"pixels"|"mask"|"filterMask"|"quickMask"|{"channel":i}=Channels panel target}"##,
             has_paintable,
             crate::brush_cmds::paint_stroke
         ),
@@ -1508,6 +1523,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::brush_preset_cmds::specs());
     v.extend(crate::eraser_cmds::specs());
     v.extend(crate::preset_import_cmds::specs());
+    v.extend(crate::style_asl_cmds::specs());
     v.extend(crate::atn_cmds::specs());
     v.extend(crate::actions_edit_cmds::specs());
     v.extend(crate::swatch_cmds::specs());
@@ -1524,6 +1540,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::file_cmds::specs());
     v.extend(crate::exr_cmds::specs());
     v.extend(crate::type_extra_cmds::specs());
+    v.extend(crate::type_area_cmds::specs());
     v.extend(crate::type_styles_cmds::specs());
     v.extend(crate::type_spell_cmds::specs());
     v.extend(crate::type_caret_cmds::specs());
@@ -1531,6 +1548,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::layer_multi_cmds::specs());
     v.extend(crate::layer_copy_cmds::specs());
     v.extend(crate::prefs::specs());
+    v.extend(crate::updates_cmds::specs());
     v.extend(crate::edit_menu_cmds::specs());
     v.extend(crate::fill_key_cmds::specs());
     v.extend(crate::sample_cmds::specs());
@@ -1691,6 +1709,7 @@ fn set_mask_with(s: &mut Session, p: &Value, label: &str, mask: Option<LayerMask
     s.edit(label, |doc, _| {
         let mask = mask.clone().map(|mask| mask_at_depth(mask, doc.depth)).transpose()?;
         for id in &ids {
+            check_all_unlocked(doc, *id)?;
             if mask.is_some() {
                 crate::extra_cmds::background_to_layer_for_mask(doc, *id);
             }
@@ -1837,5 +1856,20 @@ mod set_props_tests {
         }
         s.execute("layer.setProps", json!({"opacity": 0, "fill": 1})).unwrap();
         assert_eq!(layer(&s), (0.0, 1.0));
+    }
+}
+
+#[cfg(test)]
+mod parse_hex_tests {
+    use super::parse_hex;
+
+    #[test]
+    fn signs_and_other_non_hex_characters_are_rejected() {
+        for bad in ["#+f+f+f", "+f+f+f+f", "#-f0000", "#gg0000", "#0f0f+f"] {
+            assert_eq!(parse_hex(bad), None, "{bad:?} is not hex digits");
+        }
+        let g = 15.0 / 255.0;
+        assert_eq!(parse_hex("#0f0f0f"), Some([g, g, g, 1.0]));
+        assert_eq!(parse_hex("#0f0f0fff"), Some([g, g, g, 1.0]));
     }
 }

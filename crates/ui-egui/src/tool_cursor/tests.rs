@@ -589,3 +589,30 @@ fn resize_follows_the_view() {
         assert_eq!(got, want, "view turned {rotation}°, flip {flip}");
     }
 }
+
+#[test]
+fn type_path_cursors_are_small_and_centred() {
+    for rings in [super::area_type_rings(), super::path_type_rings()] {
+        assert!(rings.len() > 3);
+        for v in rings.iter().flatten() {
+            assert!(v.x.abs() <= 12.0 && v.y.abs() <= 12.0, "{v:?}");
+        }
+    }
+}
+
+#[test]
+fn the_pointer_belongs_to_another_window_from_its_report_until_this_one_hears_it_again() {
+    // The main window, then a floating panel's window over it, the desktop, and back.
+    let mut state = false;
+    let mut frame = |here, there| {
+        state = elsewhere(state, here, there);
+        state
+    };
+    assert!(!frame(true, false), "over the main window");
+    assert!(frame(true, true), "crossing into the floating window");
+    assert!(frame(false, true), "moving in the floating window");
+    assert!(frame(false, false), "on the desktop: the main window still heard nothing");
+    assert!(!frame(true, false), "back over the main window");
+    let float = Some(egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(200.0, 300.0)));
+    assert!(covers(float, Some(egui::pos2(150.0, 150.0))) && !covers(float, Some(egui::pos2(98.0, 150.0))), "just outside its edge stays here");
+}

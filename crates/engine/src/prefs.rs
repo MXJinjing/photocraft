@@ -61,7 +61,7 @@ choice!(DarkTheme { Pro = "pro", ProMedium = "proMedium", Studio = "studio", Sol
 choice!(LightTheme { ProLight = "proLight", ProLightGray = "proLightGray", StudioLight = "studioLight", Classic = "classic", Adwaita = "adwaita", BreezeLight = "breezeLight", SoftLight = "softLight" } default ProLight);
 choice!(CanvasColor { Default = "default", Black = "black", DarkGray = "darkGray", MediumGray = "mediumGray", LightGray = "lightGray", Custom = "custom" } default Default);
 choice!(CanvasBorder { DropShadow = "dropShadow", Line = "line", None = "none" } default DropShadow);
-choice!(UiScale { Auto = "auto", P75 = "75", P80 = "80", P85 = "85", P90 = "90", P95 = "95", P100 = "100", P125 = "125", P150 = "150", P175 = "175", P200 = "200", P250 = "250", P300 = "300" } default Auto);
+choice!(UiScale { Auto = "auto", P75 = "75", P80 = "80", P85 = "85", P90 = "90", P95 = "95", P100 = "100", P105 = "105", P110 = "110", P115 = "115", P120 = "120", P125 = "125", P150 = "150", P175 = "175", P200 = "200", P250 = "250", P300 = "300" } default Auto);
 choice!(
     /// Graphics backend of the desktop app's window and GPU canvas (applies at next launch).
     /// `auto` lets PhotoCraft pick (DX12 for Intel adapters on Windows); `cpu` composites on the
@@ -223,10 +223,13 @@ pub struct General {
     pub always_create_smart_objects_when_placing: bool,
     /// Scroll wheel zooms instead of panning.
     pub zoom_with_scroll_wheel: bool,
+    /// Wheel zoom eases over the frames of a notch; off, a notch is one instant ×1.1 step.
     pub animated_zoom: bool,
     pub zoom_resizes_windows: bool,
     pub use_legacy_free_transform: bool,
     pub auto_show_home_screen: bool,
+    /// Desktop: check published stable releases once in the background at launch.
+    pub automatically_check_updates: bool,
 }
 
 impl Default for General {
@@ -243,6 +246,7 @@ impl Default for General {
             zoom_resizes_windows: false,
             use_legacy_free_transform: false,
             auto_show_home_screen: true,
+            automatically_check_updates: true,
         }
     }
 }
@@ -546,7 +550,11 @@ pub struct Performance {
     pub memory_usage_mb: u32,
     /// Undo steps kept per document (History panel states).
     pub history_states: u32,
-    /// Display cache levels (mip levels kept for zoomed-out views).
+    /// Cache Levels, 1–8: the highest cache level the Histogram panel counts a large document at
+    /// (level n counts a proxy 2^(n-1) times smaller; 1 counts every pixel). Lower is more
+    /// accurate, higher faster. The panel picks the level from the document's size up to this;
+    /// the web build, which counts on the UI thread, reduces documents from a quarter of the size
+    /// the desktop does. Uncached Refresh always counts at level 1.
     pub cache_levels: u32,
     /// Side of the GPU canvas texture tiles, in pixels (applies at next launch).
     pub cache_tile_size: u32,
@@ -898,6 +906,35 @@ pub struct RawDefaults {
     pub open_in_camera_raw: bool,
     /// The demosaic method raws are developed with; the open-time Camera Raw dialog starts from it.
     pub demosaic: RawDemosaic,
+    /// Keep a raw file's develop settings in a sidecar (`IMG_0001.xmp` beside `IMG_0001.CR2`),
+    /// as Camera Raw's "Save image settings in: Sidecar .xmp files"; the sidecar is read again
+    /// when the file is next opened. Off reads sidecars but never writes one.
+    pub write_xmp_sidecars: bool,
+}
+
+impl RawColorSpace {
+    /// The built-in profile `edit.convertToProfile` knows this space as.
+    pub fn profile_id(self) -> &'static str {
+        match self {
+            RawColorSpace::Srgb => "srgb",
+            RawColorSpace::AdobeRgb => "adobe-rgb-compat",
+            RawColorSpace::ProPhoto => "prophoto-compat",
+            RawColorSpace::DisplayP3 => "display-p3",
+        }
+    }
+}
+
+impl RawSharpen {
+    /// Camera Raw's output sharpening for this medium as the Detail panel's (amount, radius):
+    /// none, Screen (light, fine), Matte paper (stronger, wider: ink spreads), Glossy paper.
+    pub fn preset(self) -> Option<(f32, f32)> {
+        match self {
+            RawSharpen::None => None,
+            RawSharpen::Screen => Some((25.0, 1.0)),
+            RawSharpen::Matte => Some((35.0, 1.2)),
+            RawSharpen::Glossy => Some((40.0, 1.0)),
+        }
+    }
 }
 
 impl RawDemosaic {
@@ -922,6 +959,7 @@ impl Default for RawDefaults {
             apply_auto_tone: false,
             open_in_camera_raw: true,
             demosaic: RawDemosaic::Ahd,
+            write_xmp_sidecars: true,
         }
     }
 }
@@ -1116,7 +1154,6 @@ pub const HIDDEN_UNTIL_IMPLEMENTED: &[&str] = &[
     "general.colorPicker",
     "workspace.autoShowHiddenPanels",
     "workspace.enableFloatingDocumentWindowDocking",
-    "performance.cacheLevels",
     "performance.effectCacheMb",
     "performance.legacyCompositing",
     "scratchDisks.disks",
@@ -1124,18 +1161,8 @@ pub const HIDDEN_UNTIL_IMPLEMENTED: &[&str] = &[
     "unitsAndRulers.gutter",
     "plugIns.showExtensionPanels",
     "plugIns.allowScriptsToConnect",
-    "plugIns.generatorEnabled",
     "type.textEngine",
     "enhancedControls.scrubbySliderAcceleration",
-    "rawDefaults.colorSpace",
-    "rawDefaults.bitDepth",
-    "rawDefaults.sharpenFor",
-    "rawDefaults.openAsSmartObject",
-    "rawDefaults.applyAutoTone",
-    // Agent access is governed by the launch flags (`--control`, the automation roots), not
-    // by these yet.
-    "integrations.allowAgentControl",
-    "integrations.controlPort",
 ];
 
 /// Is the preference at `path` (`"section.key"`) hidden from the Preferences dialog?
@@ -1715,6 +1742,10 @@ impl PrefsStore {
     }
 }
 
+/// The preferences file format written by [`Session::prefs_value`]. 2: Use Shift Key for Tool
+/// Switch stored as chosen (before, a stored `false` was the old default; see `load_prefs_json`).
+pub const PREFS_VERSION: u64 = 2;
+
 /// A saved preference [`Session::load_prefs_json`] couldn't read (a wrong type, an unknown
 /// choice) and left at its default.
 #[derive(Clone, Debug, PartialEq)]
@@ -1850,7 +1881,7 @@ impl Session {
         let mut v = self.prefs().to_json();
         if let Value::Object(m) = &mut v {
             m.insert("colorSettings".into(), serde_json::to_value(&self.color.settings).unwrap_or(Value::Null));
-            m.insert("version".into(), json!(1));
+            m.insert("version".into(), json!(PREFS_VERSION));
             m.insert("presets".into(), self.presets.to_json(self));
         }
         v
@@ -1865,6 +1896,16 @@ impl Session {
         let mut v: Value = serde_json::from_str(s).map_err(|e| format!("preferences: {e}"))?;
         if !v.is_object() {
             return Err("preferences: expected a JSON object".into());
+        }
+        // Files before version 2 hold Use Shift Key for Tool Switch off because that was the
+        // default when they were written: every key is saved, chosen or not. Like Photoshop it is
+        // on by default now (#3528), so those files take the new default (#5647: a tool letter
+        // pressed again kept cycling its group). A choice made since is saved as version 2.
+        if v.get("version").and_then(Value::as_u64).unwrap_or(0) < 2
+            && let Some(tools) = v.get_mut("tools").and_then(Value::as_object_mut)
+            && tools.get("useShiftKeyForToolSwitch") == Some(&json!(false))
+        {
+            tools.remove("useShiftKeyForToolSwitch");
         }
         // Saved preferences before appearance modes had one concrete theme. Preserve its
         // appearance instead of silently switching established users to Auto.
@@ -1913,7 +1954,11 @@ impl Session {
     /// Batches defer colour validation until their complete candidate is staged. Returns
     /// whether colour settings were touched, including whole-section/root-object updates.
     fn set_pref(&mut self, path: &str, value: Value, validate_color: bool) -> std::result::Result<bool, String> {
-        if let Some(rest) = path.strip_prefix("colorSettings") {
+        // The section itself or a path inside it: `colorSettingsworkingRgb`, `colorSettings.` and
+        // `colorSettings..workingRgb` are none, and the authorization policy doesn't treat them as one.
+        if let Some(rest) =
+            path.strip_prefix("colorSettings").filter(|r| r.is_empty() || r.strip_prefix('.').is_some_and(|c| c.split('.').all(|part| !part.is_empty())))
+        {
             let mut cur = serde_json::to_value(&self.color.settings).map_err(|e| e.to_string())?;
             let rest = rest.trim_start_matches('.');
             if rest.is_empty() {
@@ -2719,3 +2764,19 @@ pub fn specs() -> Vec<CommandSpec> {
 #[cfg(test)]
 #[path = "prefs/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod color_settings_path_tests {
+    use crate::Session;
+    use serde_json::json;
+
+    #[test]
+    fn a_path_that_only_starts_with_color_settings_is_not_in_that_section() {
+        let mut s = Session::new();
+        let before = s.color.settings.clone();
+        for path in ["colorSettingsworkingRgb", "colorSettings.", "colorSettings..workingRgb"] {
+            assert!(s.execute("prefs.set", json!({"path": path, "value": "/dev/zero"})).is_err(), "{path}");
+        }
+        assert_eq!(s.color.settings, before);
+    }
+}
