@@ -1267,7 +1267,7 @@ fn wheel_scroll_owns_mixed_pointer_input_and_never_paints() {
             h.input_mut().events.extend([
                 pointer_button(p, true),
                 egui::Event::PointerMoved(p + delta),
-                egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta, phase: egui::TouchPhase::Move, modifiers: Modifiers::NONE },
+                egui::Event::MouseWheel { source: egui::MouseWheelSource::Unknown, unit: egui::MouseWheelUnit::Point, delta, phase: egui::TouchPhase::Move, modifiers: Modifiers::NONE },
             ]);
             if touch_compat {
                 h.event(touch(1, egui::TouchPhase::Start, p));
@@ -1667,8 +1667,8 @@ fn a_late_second_finger_commits_the_first_stroke_and_promotes_navigation() {
 
 fn non_touch_navigation_events() -> [egui::Event; 3] {
     [
-        egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -24.0), phase: egui::TouchPhase::Move, modifiers: Modifiers::NONE },
-        egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: vec2(0.0, 1.0), phase: egui::TouchPhase::Move, modifiers: Modifiers::ALT },
+        egui::Event::MouseWheel { source: egui::MouseWheelSource::Unknown, unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -24.0), phase: egui::TouchPhase::Move, modifiers: Modifiers::NONE },
+        egui::Event::MouseWheel { source: egui::MouseWheelSource::Unknown, unit: egui::MouseWheelUnit::Line, delta: vec2(0.0, 1.0), phase: egui::TouchPhase::Move, modifiers: Modifiers::ALT },
         egui::Event::Zoom(1.1),
     ]
 }
